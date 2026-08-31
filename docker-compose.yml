@@ -1,0 +1,129 @@
+---
+# docker-compose.yml
+# Full URL shortener stack: FastAPI + PostgreSQL + Redis
+#
+# Usage:
+#   docker compose up              — start all services
+#   docker compose up --build      — rebuild app image
+#   docker compose down -v         — stop and remove volumes
+#   docker compose logs -f app     — tail app logs
+#
+# Scenario 3 reliability features visible here:
+#   restart: always                — auto-restart on crash (all services)
+#   healthcheck                    — readiness probes on Postgres and Redis
+#   depends_on.condition           — app waits for deps to be healthy
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI application ────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: url-shortener:latest
+    container_name: url-shortener-app
+    restart: always                  # Scenario 3: reliability
+    ports:
+      - "8000:8000"
+    environment:
+      # Application
+      APP_NAME: url-shortener
+      APP_VERSION: "1.0.0"
+      ENVIRONMENT: development
+      DEBUG: "false"
+      BASE_URL: "${BASE_URL:-http://localhost:8000}"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+
+      # PostgreSQL
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: urlshortener
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_POOL_MIN: "2"
+      POSTGRES_POOL_MAX: "10"
+
+      # Redis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_TTL_S: "604800"          # 7 days
+
+      # Rate limiting
+      RATE_LIMIT_REQUESTS: "60"
+      RATE_LIMIT_WINDOW_S: "60"
+
+      # Analytics
+      ANALYTICS_FLUSH_INTERVAL: "5.0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - backend
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: url-shortener-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: urlshortener
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d urlshortener"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "5432:5432"                  # exposed for local dev / migrations
+    networks:
+      - backend
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: url-shortener-redis
+    restart: always
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - redis_data:/data
+      - ./docker/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    ports:
+      - "6379:6379"                  # exposed for local dev
+    networks:
+      - backend
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# ── Networks ───────────────────────────────────────────────────────────────
+networks:
+  backend:
+    driver: bridge
